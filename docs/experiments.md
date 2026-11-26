@@ -9496,7 +9496,13 @@ an earlier fixture that did so, the split left the result at its sentinel.
 The scratch is kept with the recording's desktop allocator
 (`x2w_d3d12_recording_scratches` reports how many it holds) and is released
 only when that allocator is reset after every queue that ran it has passed its
-fence.
+fence. The rewrite's root signature and pipeline are kept for the life of the
+process in an instance that is never destroyed. In #2683 the instance was a
+function-local static: on an RX 9070 XT (driver 32.0.32029.2010) its destructor
+released the pipeline during DLL detach and the process exited with 0xC0000409
+in `amdxc64.dll` after every readback had passed. A never-destroyed instance
+exited 0 in 3 of 3 runs there.
+[Review](https://github.com/R0Y00/Xbox2Windows/pull/2683)
 
 `startup_indirect_count_(warp|hardware)` keep the native call. On the RX 5700
 XT (driver 32.0.21045.29003) the hardware test still fails at its first case

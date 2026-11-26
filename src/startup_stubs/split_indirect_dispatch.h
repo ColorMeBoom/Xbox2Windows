@@ -160,10 +160,13 @@ private:
     std::vector<std::unique_ptr<Entry>> entries_;
 };
 
+// Never destroyed: a function-local static would release its root signatures and pipelines in the destructor during
+// DLL detach, and on an RX 9070 XT (driver 32.0.32029.2010) the driver fail-fasts there (0xC0000409 in amdxc64,
+// review of #2683). The entries are already kept for the life of the process (see entry_for).
 inline SplitIndirectDispatch& split_indirect_dispatch()
 {
-    static SplitIndirectDispatch splitter;
-    return splitter;
+    static SplitIndirectDispatch* const splitter = new SplitIndirectDispatch;
+    return *splitter;
 }
 
 }  // namespace x2w_startup
