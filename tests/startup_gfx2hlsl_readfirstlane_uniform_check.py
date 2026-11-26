@@ -88,6 +88,16 @@ ACCEPTED = [
      ['v7 = U(F(s2) * 2.0 + F(0x3f800000u));']),
     ('reciprocal', ('v_rcp_f32_e32 v7, s2',),
      ['v7 = U(1.0 / F(s2));']),
+    ('base-2 logarithm', ('v_log_f32_e32 v7, s2',),
+     ['v7 = U(log2(F(s2)));']),
+    ('clamped log2 of abs scalar', ('v_log_f32_e64 v7, |s2| clamp',),
+     ['v7 = U(saturate(log2(abs(F(s2)))));']),
+    ('ceiling', ('v_ceil_f32_e32 v7, s2',),
+     ['v7 = U(ceil(F(s2)));']),
+    ('scaled ceiling of negated scalar', ('v_ceil_f32_e64 v7, -s2 mul:2',),
+     ['v7 = U((ceil((-F(s2)))) * 2.0);']),
+    ('log2 then ceil chain', ('v_log_f32_e32 v7, s2', 'v_ceil_f32_e32 v7, v7'),
+     ['v7 = U(log2(F(s2)));', 'v7 = U(ceil(F(v7)));']),
     # The clamp to [0, 0.5] of a scalar, as compiled shaders write it.
     ('median of three', ('v_med3_f32 v7, s2, 0, 0.5',),
      ['v7 = U(med3_32(F(s2), F(0x00000000u), 0.5));']),
@@ -128,6 +138,10 @@ REFUSED = [
     ('varying scalar buffer offset',
      (COMPARE, 's_buffer_load_dword s3, s[4:7], s2', 'v_mov_b32_e32 v7, s3', READ)),
     ('listed op with varying source', (MOVE, 'v_mul_f32_e64 v7, v0, 2.0', READ)),
+    ('log2 of a varying source', ('v_log_f32_e32 v7, v0', READ)),
+    ('ceil of a varying source', ('v_ceil_f32_e32 v7, v0', READ)),
+    ('log2 of a lane mask', (COMPARE, 'v_log_f32_e32 v7, s2', READ)),
+    ('ceil of a lane mask', (COMPARE, 'v_ceil_f32_e32 v7, s2', READ)),
     ('median of three with a varying source', (MOVE, 'v_med3_f32 v7, s2, v0, 0.5', READ)),
     ('median of three of a lane mask', (COMPARE, 'v_med3_f32 v7, s2, 0, 0.5', READ)),
     ('op_sel overwrite', (MOVE, 'v_mul_f32_e64 v7, s2, 2.0 op_sel:[0,0]', READ)),
@@ -187,6 +201,9 @@ check('read after the first terminator recomputed', got[:2] == ['v7 = s2;', 's9 
 # These instructions refuse before v_readfirstlane_b32 is reached.
 EARLIER = {
     'op_sel overwrite': 'modifier op_sel:[0,0]',
+    # The high word of a copied wave64 mask carries the mask tag: its numeric read is refused where it is lowered.
+    'overlapping 64-bit move high word': 'v_mov_b32 reads lane mask s4 as numeric data',
+    'high word of saved exec': 'v_mov_b32 reads lane mask s3 as numeric data',
     'modified move overwrite': "v_mov_b32 with ['clamp']",
     'mask from uniform compare': 'v_mov_b32 data operand s2 is a lane mask',
     'vcc': 'v_mov_b32 data operand vcc_lo is a lane mask',
@@ -194,6 +211,16 @@ EARLIER = {
     'compare into SGPR': 'v_mov_b32 data operand s2 is a lane mask',
     'saved exec': 'v_mov_b32 data operand s2 is a lane mask',
     'mask in the entry block': 'v_mov_b32 data operand s2 is a lane mask',
+    'median of three of a lane mask': 'v_med3_f32 reads lane mask s2 as numeric data',
+    'log2 of a lane mask': 'v_log_f32 reads lane mask s2 as numeric data',
+    'ceil of a lane mask': 'v_ceil_f32 reads lane mask s2 as numeric data',
+    'unsigned to float conversion of a mask': 'v_cvt_f32_u32 reads lane mask s2 as numeric data',
+    # A scalar op that reads a lane mask as a number is refused where it is lowered (before the read).
+    'aliased load first word': 's_buffer_load_dwordx2 reads lane mask s2 as numeric data',
+    'aliased load second word': 's_buffer_load_dwordx2 reads lane mask s2 as numeric data',
+    'varying scalar buffer offset': 's_buffer_load_dword reads lane mask s2 as numeric data',
+    'mask through scalar arithmetic': 's_add_u32 reads lane mask s2 as numeric data',
+    'mask through scalar condition': 's_cmp_eq_u32 reads lane mask vcc_lo as numeric data',
 }
 for label, instructions in REFUSED:
     got = run(*instructions)
@@ -208,10 +235,14 @@ got = run('s_and_b32 m0, s2, 0xff', 's_cselect_b32 s3, 1, 0', 'v_mov_b32_e32 v7,
 check('uniform m0 write into SCC accepted',
       got == ['m0 = s2 & 0x000000ffu;', 'scc = m0 != 0;', 's3 = scc ? 0x00000001u : 0x00000000u;',
               'v7 = s3;', 's9 = v7;'], repr(got))
-# Every other SCC write either updates the proof or invalidates it: ops whose SCC result is not
-# modelled (carry, selected source), s_wqm, and the symbolic descriptor path, which emits nothing.
-for label, first in (('unmodelled carry', 's_add_u32 s3, s2, 1'),
-                     ('whole quad mode', 's_wqm_b64 exec, exec'),
+# s_add_u32 and its siblings emit their SCC (carry, borrow, overflow, selected source) from the sources, so the select that
+# reads it is uniform when the sources are.
+got = run('s_add_u32 s3, s2, 1', 's_cselect_b32 s3, 1, 0', 'v_mov_b32_e32 v7, s3', READ)
+check('select after a modelled carry from a uniform source accepted',
+      got == ['scc = (s2 + 0x00000001u) < (s2);', 's3 = s2 + 0x00000001u;', 's3 = scc ? 0x00000001u : 0x00000000u;',
+              'v7 = s3;', 's9 = v7;'], repr(got))
+# Every other SCC write either updates the proof or invalidates it: s_wqm and the symbolic descriptor path, which emits nothing.
+for label, first in (('whole quad mode', 's_wqm_b64 exec, exec'),
                      ('symbolic descriptor word', 's_and_b32 s10, s4, 0xff')):
     got = run(first, 's_cselect_b32 s3, 1, 0', 'v_mov_b32_e32 v7, s3', READ)
     check(f'select after {label} refused', got == REFUSAL, repr(got))
@@ -308,7 +339,10 @@ for label, instructions, group in (
         ('thread id base rewritten after', (GID, 'v_add_nc_u32_e32 v0, s3, v0', WAVE, READ1), (64, 1, 1)),
         ('thread id base scaled by 32', ('v_lshl_add_u32 v0, s2, 5, v0', WAVE, READ1), (64, 1, 1))):
     got = run(*instructions, kind='cs', group=group)
-    check(f'{label} refused', got == REFUSAL, repr(got))
+    # The compare's mask in s2 is refused where v_lshl_add_u32 reads it as a number, before the read.
+    expected = ('v_lshl_add_u32 reads lane mask s2 as numeric data'
+                if label == 'thread id base from a varying scalar' else REFUSAL)
+    check(f'{label} refused', got == expected, repr(got))
 
 # Only bits that survive both the field operation and the final shift may vary across threads.
 AND_OR = 'v_and_or_b32 v2, v0, 3, s2'
@@ -341,7 +375,9 @@ for label, instructions, size in (
         ('signed field', ('v_bfe_i32 v2, v0, 2, 3', SHIFT1, READ1), 8),
         ('unknown group for a masked field', (AND_OR, SHIFT, READ1), None)):
     got = run(*instructions, kind='cs', group=(size, 1, 1) if size else None)
-    check(f'{label} refused', got == REFUSAL, repr(got))
+    # a lane mask as the OR source meets the mask rule (#2702) before the uniformity rule: either refusal keeps it refused
+    mask_first = label == 'predicate as OR source' and got == 'v_and_or_b32 reads lane mask s2 as numeric data'
+    check(f'{label} refused', got == REFUSAL or mask_first, repr(got))
 
 # Older probes may provide either no tracker or only part of the tracking state.
 for present in ((), ('uniform_v',), ('uniform_v', 'varying_s')):
