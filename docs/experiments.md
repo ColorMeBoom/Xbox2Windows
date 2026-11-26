@@ -9697,6 +9697,23 @@ released the pipeline during DLL detach and the process exited with 0xC0000409
 in `amdxc64.dll` after every readback had passed. A never-destroyed instance
 exited 0 in 3 of 3 runs there.
 [Review](https://github.com/R0Y00/Xbox2Windows/pull/2683)
+On the same adapter and driver, with this change merged onto main,
+`startup_indirect_count_split_hardware` passed and 6 of 6 direct runs exited 0;
+with only `split_indirect_dispatch.h` restored to the static, 4 of 4 runs ended
+in 0xC0000409, the dump showing the static's destructor in
+`_execute_onexit_table` at DLL detach.
+[Measurement](https://github.com/R0Y00/Xbox2Windows/pull/2734)
+
+The cache is process-owned and released only by process exit. Explicitly
+unloading and reloading `d3d12_xs.dll` in a live host is not a supported path:
+each load allocates a new cache and nothing tears the previous one down outside
+the loader lock. Supporting it needs that teardown and its own coverage. The
+kept root signature and pipeline each hold a reference to their device: on the
+RX 5700 XT and WARP 10.0.26100.9818 the device count went from 1 to 3 with both
+objects created, and stayed at 2 after the application released its own
+reference. So a cached device is never destroyed, and `entry_for`, which matches
+devices by pointer, cannot see a new device at a reused address while an entry
+holds those objects. An entry whose build failed holds neither.
 
 `startup_indirect_count_(warp|hardware)` keep the native call. On the RX 5700
 XT (driver 32.0.21045.29003) the hardware test still fails at its first case
